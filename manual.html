@@ -1,0 +1,228 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <title>출퇴근 수동 입력 (정정)</title>
+  <style>
+    /* 기존 스타일 동일하게 유지 - 스크롤 방지를 위해 생략 처리 없이 전체 삽입 요망 */
+    * { box-sizing: border-box; }
+    body { font-family: 'Malgun Gothic', 'Apple SD Gothic Neo', sans-serif; margin: 0; padding: 16px; background-color: #f0f2f5; }
+    .header { background-color: #1a3a6b; color: #ffffff; padding: 18px; border-radius: 14px; margin-bottom: 16px; font-size: 22px; font-weight: bold; text-align: center; }
+    .site-name { font-size: 22px; margin-top: 4px; }
+    .form-group { background: #ffffff; border-radius: 14px; padding: 18px; margin-bottom: 14px; }
+    label { display: block; font-size: 19px; font-weight: bold; margin-bottom: 8px; color: #1a3a6b; }
+    input[type="date"], input[type="text"], textarea { width: 100%; font-size: 20px; padding: 12px; border: 2px solid #ccc; border-radius: 10px; font-family: inherit; }
+    textarea { resize: vertical; min-height: 90px; }
+    .name-list { max-height: 230px; overflow-y: auto; margin-top: 10px; border-radius: 10px; border: 1px solid #ddd; }
+    .name-item { padding: 14px; font-size: 19px; border-bottom: 1px solid #eee; }
+    .name-item:last-child { border-bottom: none; }
+    #selectedNameDisplay { margin-top: 10px; font-size: 21px; font-weight: bold; color: #1a3a6b; }
+    .type-toggle { display: flex; gap: 10px; }
+    .type-btn { flex: 1; padding: 20px; font-size: 21px; font-weight: bold; border-radius: 12px; border: 3px solid #1a3a6b; background: #ffffff; color: #1a3a6b; cursor: pointer; }
+    .type-btn.active { background: #1a3a6b; color: #ffffff; }
+    .btn { display: block; width: 100%; padding: 22px; font-size: 23px; font-weight: bold; border-radius: 14px; border: none; margin-top: 10px; cursor: pointer; text-align: center; text-decoration: none; }
+    .btn-primary   { background-color: #1a3a6b; color: #ffffff; }
+    .btn-secondary { background-color: #ffffff; color: #1a3a6b; border: 3px solid #1a3a6b; }
+    .message-box { display: none; padding: 16px; border-radius: 12px; font-size: 19px; font-weight: bold; margin-bottom: 14px; white-space: pre-line; }
+    .message-success { background: #e6f4ea; border: 2px solid #2e7d32; color: #2e7d32; }
+    .message-error   { background: #fdecea; border: 2px solid #c62828; color: #c62828; }
+  </style>
+</head>
+<body>
+  <div class="header">
+    출퇴근 수동 입력 (정정)
+    <div class="site-name" id="siteNameDisplay">사업장 확인 중...</div>
+  </div>
+
+  <div id="messageBox" class="message-box"></div>
+
+  <form id="correctionForm" onsubmit="return false;">
+    <div class="form-group">
+      <label>① 날짜 선택 (당일 또는 전일만 가능)</label>
+      <input type="date" id="targetDate">
+    </div>
+    <div class="form-group">
+      <label>② 이름 검색</label>
+      <input type="text" id="nameSearch" placeholder="이름을 입력하세요" oninput="filterNames()">
+      <div class="name-list" id="nameList"></div>
+      <div id="selectedNameDisplay"></div>
+    </div>
+    <div class="form-group">
+      <label>③ 구분 선택</label>
+      <div class="type-toggle">
+        <button type="button" class="type-btn" id="btnCheckin" onclick="selectType('출근')">출근</button>
+        <button type="button" class="type-btn" id="btnCheckout" onclick="selectType('퇴근')">퇴근</button>
+      </div>
+    </div>
+    <div class="form-group">
+      <label>④ 처리자 이름 (소장님 이름)</label>
+      <input type="text" id="processedBy" placeholder="예: 홍길동 소장">
+    </div>
+    <div class="form-group">
+      <label>⑤ 정정 사유 (필수 입력)</label>
+      <textarea id="reason" placeholder="예: QR 인식 오류로 출근 기록 누락"></textarea>
+    </div>
+    <button class="btn btn-primary" onclick="submitCorrection()">정정 내용 저장</button>
+  </form>
+
+  <a id="scanLink" class="btn btn-secondary" href="#">QR 스캔으로 돌아가기</a>
+
+  <script>
+    // [중요] 다음 단계에서 이 주소를 백엔드 API 주소로 변경해야 합니다.
+    const GAS_API_URL = "여기에_GAS_웹앱_주소_입력";
+
+    const urlParams = new URLSearchParams(window.location.search);
+    const siteCode = urlParams.get('site');
+    
+    let employeeList = [];      
+    let selectedEmployee = null;
+    let selectedType = null;
+
+    window.onload = function () {
+      if (!siteCode) {
+        showMessage('error', 'URL에 사업장코드가 없습니다.\n관리자에게 정확한 주소를 요청하세요.');
+        return;
+      }
+      
+      document.getElementById('scanLink').href = `index.html?site=${siteCode}`;
+
+      // 사업장 정보 조회
+      fetch(GAS_API_URL, {
+        method: 'POST',
+        headers: { 'Content-Type': 'text/plain' },
+        body: JSON.stringify({ action: 'getSiteInfo', siteCode: siteCode })
+      })
+      .then(res => res.json())
+      .then(res => onSiteInfoLoaded(res))
+      .catch(err => showMessage('error', '서버 연결 중 오류가 발생했습니다.'));
+
+      // 인원 목록 조회
+      fetch(GAS_API_URL, {
+        method: 'POST',
+        headers: { 'Content-Type': 'text/plain' },
+        body: JSON.stringify({ action: 'getEmployeesBySite', siteCode: siteCode })
+      })
+      .then(res => res.json())
+      .then(list => { employeeList = list; })
+      .catch(err => showMessage('error', '인원 목록을 불러오지 못했습니다.'));
+    };
+
+    function onSiteInfoLoaded(res) {
+      const dateInput = document.getElementById('targetDate');
+      dateInput.min = res.yesterdayStr;
+      dateInput.max = res.todayStr;
+      dateInput.value = res.todayStr;
+
+      if (!res.success) {
+        showMessage('error', res.message);
+        return;
+      }
+      document.getElementById('siteNameDisplay').innerText = res.siteName;
+    }
+
+    function filterNames() {
+      const keyword = document.getElementById('nameSearch').value.trim();
+      const listEl = document.getElementById('nameList');
+      listEl.innerHTML = '';
+      if (!keyword) return;
+
+      const matched = employeeList.filter(function (emp) { return emp.name.includes(keyword); });
+      if (matched.length === 0) {
+        const item = document.createElement('div');
+        item.className = 'name-item';
+        item.innerText = '검색 결과가 없습니다.';
+        listEl.appendChild(item);
+        return;
+      }
+
+      matched.forEach(function (emp) {
+        const item = document.createElement('div');
+        item.className = 'name-item';
+        item.innerText = emp.name + ' (' + emp.employeeId + ')';
+        item.onclick = function () { selectEmployee(emp); };
+        listEl.appendChild(item);
+      });
+    }
+
+    function selectEmployee(emp) {
+      selectedEmployee = emp;
+      document.getElementById('selectedNameDisplay').innerText = '선택됨: ' + emp.name + ' (' + emp.employeeId + ')';
+      document.getElementById('nameList').innerHTML = '';
+      document.getElementById('nameSearch').value = '';
+    }
+
+    function selectType(type) {
+      selectedType = type;
+      document.getElementById('btnCheckin').classList.toggle('active', type === '출근');
+      document.getElementById('btnCheckout').classList.toggle('active', type === '퇴근');
+    }
+
+    function showMessage(kind, text) {
+      const box = document.getElementById('messageBox');
+      box.className = 'message-box ' + (kind === 'success' ? 'message-success' : 'message-error');
+      box.innerText = text;
+      box.style.display = 'block';
+    }
+
+    function submitCorrection() {
+      const targetDate = document.getElementById('targetDate').value;
+      const processedBy = document.getElementById('processedBy').value.trim();
+      const reason = document.getElementById('reason').value.trim();
+
+      if (!targetDate)        { showMessage('error', '날짜를 선택해주세요.'); return; }
+      if (!selectedEmployee)  { showMessage('error', '이름을 검색하여 선택해주세요.'); return; }
+      if (!selectedType)      { showMessage('error', '출근 또는 퇴근을 선택해주세요.'); return; }
+      if (!processedBy)       { showMessage('error', '처리자 이름을 입력해주세요.'); return; }
+      if (!reason)            { showMessage('error', '정정 사유를 입력해주세요.'); return; }
+
+      const submitBtn = document.querySelector('.btn-primary');
+      submitBtn.disabled = true;
+      submitBtn.innerText = '저장 중...';
+
+      fetch(GAS_API_URL, {
+        method: 'POST',
+        headers: { 'Content-Type': 'text/plain' },
+        body: JSON.stringify({ 
+          action: 'submitCorrection',
+          payload: {
+            targetDate: targetDate,
+            employeeId: selectedEmployee.employeeId,
+            employeeName: selectedEmployee.name,
+            type: selectedType,
+            reason: reason,
+            siteCode: siteCode,
+            processedBy: processedBy
+          }
+        })
+      })
+      .then(res => res.json())
+      .then(res => onSubmitResult(res))
+      .catch(err => {
+        showMessage('error', '서버 처리 중 오류가 발생했습니다.');
+        submitBtn.disabled = false;
+        submitBtn.innerText = '정정 내용 저장';
+      });
+    }
+
+    function onSubmitResult(res) {
+      const submitBtn = document.querySelector('.btn-primary');
+      submitBtn.disabled = false;
+      submitBtn.innerText = '정정 내용 저장';
+
+      if (res.success) {
+        showMessage('success', res.message);
+        document.getElementById('reason').value = '';
+        document.getElementById('processedBy').value = '';
+        selectedEmployee = null;
+        selectedType = null;
+        document.getElementById('selectedNameDisplay').innerText = '';
+        document.getElementById('btnCheckin').classList.remove('active');
+        document.getElementById('btnCheckout').classList.remove('active');
+      } else {
+        showMessage('error', res.message);
+      }
+    }
+  </script>
+</body>
+</html>
