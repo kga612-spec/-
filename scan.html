@@ -6,7 +6,6 @@
   <title>출퇴근 QR 스캔</title>
   <script src="https://unpkg.com/html5-qrcode@2.3.8/html5-qrcode.min.js"></script>
   <style>
-    /* 기존 스타일 그대로 유지 */
     * { box-sizing: border-box; }
     body { font-family: 'Malgun Gothic', 'Apple SD Gothic Neo', sans-serif; margin: 0; padding: 16px; background-color: #f0f2f5; text-align: center; }
     .header { background-color: #1a3a6b; color: #ffffff; padding: 18px; border-radius: 14px; margin-bottom: 16px; font-size: 22px; font-weight: bold; }
@@ -32,12 +31,14 @@
     .spinner { border: 6px solid #f3f3f3; border-top: 6px solid #1a3a6b; border-radius: 50%; width: 50px; height: 50px; animation: spin 1s linear infinite; margin-bottom: 16px; }
     @keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
     .loading-text { font-size: 20px; font-weight: bold; color: #1a3a6b; }
+    .retry-text { font-size: 14px; color: #e67e22; margin-top: 10px; font-weight: bold; }
   </style>
 </head>
 <body>
   <div id="loadingOverlay" class="loading-overlay">
     <div class="spinner"></div>
-    <div class="loading-text">시스템 연결 중...</div>
+    <div id="loadingText" class="loading-text">시스템 연결 중...</div>
+    <div id="retryText" class="retry-text hidden">동시 접속이 많아 재시도 중입니다...</div>
   </div>
 
   <div class="header">
@@ -50,7 +51,8 @@
     <div id="reader-wrapper">
       <div id="reader"></div>
     </div>
-    <a id="manualLink" href="#" class="btn">수동 입력 (기록 정정)</a>
+    <!-- 대시보드(수동입력) 탭으로 이동 -->
+    <a id="manualLink" href="#" class="btn">현장 관리자 대시보드</a>
   </div>
 
   <div id="resultBox" class="result-box hidden">
@@ -63,10 +65,9 @@
   </div>
 
   <script>
-    // [중요] 다음 단계에서 이 주소를 백엔드 API 주소로 변경해야 합니다.
-    const GAS_API_URL = "https://script.google.com/macros/s/AKfycby2K41kHCC6BWWDzuyiGS4SpOObiOjFlKK0Gb85TMlDxO86mSJLOshJm-fJhCx0g7pN/exec"; 
+    // ⚠️ 반드시 이전에 배포한 새 GAS 주소로 변경하십시오.
+    const GAS_API_URL = "여기에_GAS_웹앱_주소_입력";
 
-    // 주소창에서 site 파라미터 직접 추출 (기존 <?= site ?> 대체)
     const urlParams = new URLSearchParams(window.location.search);
     const siteCode = urlParams.get('site');
     
@@ -79,22 +80,47 @@
         return;
       }
       
-      // 수동입력 버튼 링크 세팅
       document.getElementById('manualLink').href = `manual.html?site=${siteCode}`;
 
-      // 구글 전용 문법(google.script.run)을 표준 fetch API로 변경
-      fetch(GAS_API_URL, {
-        method: 'POST',
-        headers: { 'Content-Type': 'text/plain' }, // CORS 방지를 위해 text/plain 사용
-        body: JSON.stringify({ action: 'getSiteInfo', siteCode: siteCode })
-      })
-      .then(response => response.json())
-      .then(res => onSiteInfoReceived(res))
-      .catch(err => showInitError("서버 통신 오류가 발생했습니다.\n네트워크 상태를 확인하세요."));
+      // 초기 사업장 정보 로드 (재시도 로직 포함)
+      fetchWithRetry({ action: 'getSiteInfo', siteCode: siteCode })
+        .then(res => onSiteInfoReceived(res))
+        .catch(err => showInitError("서버 통신 오류가 발생했습니다.\n네트워크 상태를 확인하세요."));
     });
+
+    // -------------------------------------------------------------
+    // 🛡️ [핵심] 트래픽 스파이크 방어용 지수 백오프(재시도) 통신 모듈
+    // -------------------------------------------------------------
+    async function fetchWithRetry(payload, retries = 3, delay = 1000) {
+      for (let i = 0; i <= retries; i++) {
+        try {
+          const response = await fetch(GAS_API_URL, {
+            method: 'POST',
+            headers: { 'Content-Type': 'text/plain' },
+            body: JSON.stringify(payload)
+          });
+          
+          if (!response.ok) throw new Error(`HTTP error! status: ${response.status}`);
+          const data = await response.json();
+          return data;
+          
+        } catch (error) {
+          console.warn(`[통신 실패] ${i + 1}회 시도 실패. 에러:`, error.message);
+          if (i === retries) throw error; // 마지막 시도까지 실패하면 에러 던짐
+          
+          // 사용자 화면에 재시도 중임을 알림
+          document.getElementById('retryText').classList.remove('hidden');
+          
+          // 대기 시간: 1초 -> 2초 -> 4초로 점점 늘려서 서버 부하 분산
+          const waitTime = delay * Math.pow(2, i); 
+          await new Promise(resolve => setTimeout(resolve, waitTime));
+        }
+      }
+    }
 
     function onSiteInfoReceived(res) {
       document.getElementById('loadingOverlay').classList.add('hidden');
+      document.getElementById('retryText').classList.add('hidden');
       if (res.success) {
         document.getElementById('siteNameDisplay').innerText = res.siteName;
         initCamera(); 
@@ -126,10 +152,9 @@
       
       html5QrCode.start({ facingMode: "environment" }, config, onQrCodeSuccess)
       .catch(err => {
-        console.log("후면 카메라 탐색 실패, 기본 카메라로 재시도합니다.", err);
         html5QrCode.start({ facingMode: "user" }, config, onQrCodeSuccess)
         .catch(err2 => {
-          alert("카메라를 실행할 수 없습니다.\n\n[체크사항]\n1. 주소가 https:// 로 시작하는지 확인\n2. 브라우저 설정에서 카메라 권한을 '허용'했는지 확인");
+          alert("카메라를 실행할 수 없습니다.\n브라우저 권한을 확인하세요.");
         });
       });
     }
@@ -140,21 +165,17 @@
       if (html5QrCode && html5QrCode.isScanning) { html5QrCode.pause(); }
 
       document.getElementById('loadingOverlay').classList.remove('hidden');
-      document.getElementById('loadingOverlay').querySelector('.loading-text').innerText = "근태 기록 중...";
+      document.getElementById('loadingText').innerText = "출근 데이터 전송 중...";
 
-      // 출퇴근 기록 전송 (fetch API 사용)
-      fetch(GAS_API_URL, {
-        method: 'POST',
-        headers: { 'Content-Type': 'text/plain' },
-        body: JSON.stringify({ action: 'processQrScan', qrValue: decodedText, siteCode: siteCode })
-      })
-      .then(response => response.json())
-      .then(res => onQrProcessResult(res))
-      .catch(err => onQrProcessResult({ success: false, message: "서버 응답 오류가 발생했습니다." }));
+      // 강력한 재시도 모듈을 태워서 서버로 전송
+      fetchWithRetry({ action: 'processQrScan', qrValue: decodedText, siteCode: siteCode })
+        .then(res => onQrProcessResult(res))
+        .catch(err => onQrProcessResult({ success: false, message: "접속량이 너무 많습니다.\n잠시 후 다시 스캔해주세요." }));
     }
 
     function onQrProcessResult(res) {
       document.getElementById('loadingOverlay').classList.add('hidden');
+      document.getElementById('retryText').classList.add('hidden'); // 재시도 문구 초기화
       document.getElementById('scanSection').classList.add('hidden');
       const box = document.getElementById('resultBox');
       box.classList.remove('hidden');
@@ -164,8 +185,8 @@
         document.getElementById('resultIcon').innerText = '✅';
         document.getElementById('resultName').innerText = res.name + '님';
         const typeEl = document.getElementById('resultType');
-        typeEl.innerText = res.type + ' 처리되었습니다';
-        typeEl.className = (res.type === '출근') ? 'big-type type-checkin' : 'big-type type-checkout';
+        typeEl.innerText = res.type + ' 완료';
+        typeEl.className = 'big-type type-checkin';
         document.getElementById('resultTime').innerText = '시각: ' + res.time;
         document.getElementById('resultErrorText').innerText = '';
       } else {
